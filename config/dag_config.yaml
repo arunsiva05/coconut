@@ -2,44 +2,44 @@
 # DBX SQL Sensor + Job Runner — DAG Configuration
 # =============================================================================
 #
-# date_mode:   Today | Yesterday | Custom
-#              Determines what YYYYMMDD is substituted into SQL queries and
-#              job parameters at runtime.
-# custom_date: Only used when date_mode: Custom
-#              Format: YYYYMMDD  (e.g. "20240315")
+# databricks_conn_id
+#   Single fixed Airflow connection used by every sensor and every job.
 #
-# sensors.operation: AND → all sensors must succeed before jobs run (AssetAll)
-#                    OR  → any sensor succeeding is enough        (AssetAny)
+# sensors.checks
+#   Each entry polls a Databricks SQL endpoint.
+#   The placeholder {YYYYMMDD} in sql is replaced at runtime with the date
+#   resolved from the date_mode DAG param (Today | Yesterday | Custom).
+#   On success, each check emits the named Airflow Asset.
 #
-# In SQL queries and notebook_params values, the token {YYYYMMDD} is replaced
-# at task-execution time with the resolved date string.
+# jobs
+#   Each job entry specifies:
+#     job_name    – Databricks display name; job_id is looked up at runtime.
+#     operation   – AND → all listed depends_on assets must be emitted (AssetAll)
+#                   OR  → any one of them is enough                   (AssetAny)
+#     depends_on  – list of sensor check names whose assets gate this job.
+#
+# date_mode is NOT stored here.  Pass it as a DAG param at trigger time.
+# Default is "Yesterday".  Valid values: Today | Yesterday | Custom
+# When Custom, also pass custom_date (YYYYMMDD).
 # =============================================================================
 
-date_mode: "Yesterday"        # Today | Yesterday | Custom
-custom_date:                  # YYYYMMDD — only relevant when date_mode: Custom
+# ── Single connection used by all sensors and jobs ───────────────────────────
+databricks_conn_id: "databricks_default"
 
-# -----------------------------------------------------------------------------
-# SQL Sensor checks
-# Each check polls a Databricks SQL endpoint until the query returns a
-# truthy result, then emits the named Airflow Asset.
-# -----------------------------------------------------------------------------
+# ── SQL Sensor checks ─────────────────────────────────────────────────────────
 sensors:
-  operation: "AND"            # AND | OR
-
   checks:
     - name: "sales_data_ready"
-      connection_id: "databricks_default"
       sql: >
         SELECT COUNT(*) AS cnt
         FROM   main.default.sales
         WHERE  sale_date = '{YYYYMMDD}'
         HAVING COUNT(*) > 0
       asset_name: "sales_data_ready"
-      poke_interval: 60       # seconds between each SQL poll
-      timeout: 7200           # max seconds to wait before failing
+      poke_interval: 60       # seconds between SQL polls
+      timeout: 7200           # max seconds to wait
 
     - name: "inventory_data_ready"
-      connection_id: "databricks_default"
       sql: >
         SELECT 1
         FROM   main.default.inventory
@@ -49,25 +49,26 @@ sensors:
       poke_interval: 60
       timeout: 7200
 
-    # ── Add more checks here ──────────────────────────────────────────────
+    # ── Add more checks here ──────────────────────────────────────────────────
     # - name: "orders_data_ready"
-    #   connection_id: "databricks_default"
     #   sql: >
     #     SELECT 1 FROM main.default.orders
-    #     WHERE  order_date = '{YYYYMMDD}' LIMIT 1
+    #     WHERE order_date = '{YYYYMMDD}' LIMIT 1
     #   asset_name: "orders_data_ready"
     #   poke_interval: 60
     #   timeout: 7200
 
-# -----------------------------------------------------------------------------
-# Databricks Jobs
-# Triggered when the asset conditions above are satisfied.
-# {YYYYMMDD} in any string value is replaced with the resolved date.
-# -----------------------------------------------------------------------------
+# ── Databricks Jobs ───────────────────────────────────────────────────────────
+# job_name is the Databricks display name; job_id is resolved at runtime.
+# operation and depends_on are per-job.
+# {YYYYMMDD} in any parameter value is replaced with the resolved date.
 jobs:
   - name: "process_sales"
-    connection_id: "databricks_default"
-    job_id: "123456789"
+    job_name: "Process Sales Job"
+    operation: "AND"                    # all listed assets must be ready
+    depends_on:
+      - "sales_data_ready"
+      - "inventory_data_ready"
     notebook_params:
       date: "{YYYYMMDD}"
       environment: "prod"
@@ -75,8 +76,10 @@ jobs:
     spark_submit_params: []
 
   - name: "generate_daily_report"
-    connection_id: "databricks_default"
-    job_id: "987654321"
+    job_name: "Daily Report Generator"
+    operation: "OR"                     # any one asset being ready is enough
+    depends_on:
+      - "sales_data_ready"
     notebook_params:
       date: "{YYYYMMDD}"
       report_type: "daily"
@@ -85,8 +88,11 @@ jobs:
 
   # ── Add more jobs here ────────────────────────────────────────────────────
   # - name: "refresh_dashboard"
-  #   connection_id: "databricks_default"
-  #   job_id: "111222333"
+  #   job_name: "Dashboard Refresh Job"
+  #   operation: "AND"
+  #   depends_on:
+  #     - "sales_data_ready"
+  #     - "inventory_data_ready"
   #   notebook_params:
   #     run_date: "{YYYYMMDD}"
   #   python_params: []

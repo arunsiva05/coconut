@@ -97,7 +97,6 @@ from typing import Any, Callable, Generator
 from airflow.sdk import DAG, Asset, Metadata, Variable, Param, task
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.microsoft.azure.hooks.wasb import WasbHook
-from airflow.providers.microsoft.azure.hooks.data_lake import AzureDataLakeStorageV2Hook
 from airflow.providers.microsoft.azure.sensors.wasb import WasbBlobSensor
 from airflow.providers.databricks.operators.databricks import DatabricksRunNowOperator
 
@@ -108,6 +107,10 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 AZURE_CONN_ID      = "azure_blob_conn"
+# Replace with your actual Azure Storage account name.
+# Used for Airflow Asset URIs and as a fallback account name when the
+# Airflow connection's 'host' field is not set (prevents the
+# 'None.dfs.core.windows.net' ADLS connection error).
 STORAGE_ACCOUNT    = "your_storage_account"
 DATABRICKS_CONN_ID = "databricks_default"
 
@@ -1085,7 +1088,7 @@ def make_archive_fn(cfg: dict) -> Callable:
       True  → Run the shared Databricks job (job ID from Airflow Variable
                archive_job_id). Parameters: volume_base_path + filename.
 
-      False → Use AzureDataLakeStorageV2Hook (ADLS Gen2 rename):
+      False → Use DataLakeServiceClient directly (ADLS Gen2 rename):
                Atomically moves the file by replacing 'toAzure' with
                'archive' in the path. rename_file() is a pure metadata
                operation — no data copied, no egress cost, no delete step.
@@ -1176,11 +1179,44 @@ def make_archive_fn(cfg: dict) -> Callable:
                 _file_id, container, file_path, _archive_container, archive_path,
             )
 
-            # AzureDataLakeStorageV2Hook wraps the ADLS Gen2 DataLake SDK.
-            # Uses the same connection ID — Azure connection supports both
-            # Blob and ADLS Gen2 APIs on the same storage account.
-            adls_hook   = AzureDataLakeStorageV2Hook(adls_conn_id=AZURE_CONN_ID)
-            adls_client = adls_hook.get_conn()  # DataLakeServiceClient
+            # Build DataLakeServiceClient directly so we can fall back to the
+            # module-level STORAGE_ACCOUNT constant when conn.host is not set.
+            # AzureDataLakeStorageV2Hook.get_conn() derives the account URL from
+            # conn.host; if that field is None the URL becomes
+            # "None.dfs.core.windows.net", causing the connection to fail.
+            # Constructing the client here mirrors the hook's logic while
+            # honouring all supported auth types (connection string, service
+            # principal, SAS token, account key).
+            from airflow.hooks.base import BaseHook
+            from azure.storage.filedatalake import DataLakeServiceClient
+
+            _conn    = BaseHook.get_connection(AZURE_CONN_ID)
+            _extra   = _conn.extra_dejson or {}
+            _conn_str = (
+                _extra.get("connection_string")
+                or _extra.get("extra__azure_data_lake__connection_string")
+            )
+            if _conn_str:
+                adls_client = DataLakeServiceClient.from_connection_string(_conn_str)
+            else:
+                # Prefer the connection's host; fall back to STORAGE_ACCOUNT.
+                _acct_name   = _conn.host or STORAGE_ACCOUNT
+                _account_url = (
+                    _extra.get("account_url")
+                    or f"https://{_acct_name}.dfs.core.windows.net"
+                )
+                _tenant = _extra.get("tenant_id") or _extra.get("extra__azure__tenant_id")
+                if _tenant:
+                    from azure.identity import ClientSecretCredential
+                    _credential = ClientSecretCredential(
+                        tenant_id=_tenant,
+                        client_id=_conn.login,
+                        client_secret=_conn.password,
+                    )
+                else:
+                    _sas        = _extra.get("sas_token") or _extra.get("extra__adls__sas_token")
+                    _credential = _sas or _conn.password
+                adls_client = DataLakeServiceClient(account_url=_account_url, credential=_credential)
 
             src_file_client = adls_client.get_file_client(
                 file_system=container,

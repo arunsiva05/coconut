@@ -1,0 +1,9 @@
+# Core Airflow
+apache-airflow==3.1.6
+
+# Databricks provider — sensors and operators
+# Requires: DatabricksSqlSensor, DatabricksRunNowOperator
+apache-airflow-providers-databricks>=6.0.0
+
+# YAML config parsing
+PyYAML>=6.0.1

@@ -1,6 +1,13 @@
 """
-Azure Data Lake Storage (ADLS Gen2) — Operations DAG
-=====================================================
+Azure Data Lake Storage — WasbHook Operations DAG  (adls_wasb_operations)
+=========================================================================
+
+Implements four ADLS Gen2 storage operations via **WasbHook**
+(``azure-storage-blob`` SDK / ``BlobServiceClient``).
+
+See ``adls_operations.py`` for the equivalent DAG that drives the same
+operations through **AzureDataLakeStorageV2Hook**
+(``azure-storage-file-datalake`` SDK / ``DataLakeServiceClient``).
 
 A single, manually-triggered DAG that performs one of four ADLS operations
 based on the ``operation`` run parameter supplied at trigger time.
@@ -184,7 +191,7 @@ def _copy_blob(
 # ─────────────────────────────────────────────────────────────────────────────
 
 with DAG(
-    dag_id="adls_operations_dag",
+    dag_id="adls_wasb_operations_dag",
     description=(
         "ADLS Gen2 file operations (list / move / delete / check) "
         "using Azure Managed Identity."

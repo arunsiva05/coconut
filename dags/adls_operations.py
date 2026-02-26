@@ -10,9 +10,10 @@ of ``WasbHook`` (``azure-storage-blob`` SDK / ``BlobServiceClient``).
 ADLS Gen2 advantages used in this DAG
 --------------------------------------
 list_files
-    ``get_paths()`` returns ``PathProperties`` objects that carry rich
-    metadata per file — size, last-modified timestamp, creation time,
-    owner, group, POSIX permissions — not just blob names.
+    ``DataLakeFileSystemClient.get_paths()`` (Azure SDK) returns
+    ``PathProperties`` objects that carry rich metadata per file — size,
+    last-modified timestamp, creation time, owner, group, POSIX permissions
+    — not just blob names.
 
 move_files
     ADLS Gen2 supports an **atomic, server-side rename** via
@@ -29,9 +30,10 @@ delete_files
     ``dry_run`` mode for safe pre-production validation.
 
 check_file_exists
-    ``get_paths()`` with a configurable minimum-count threshold acts as a
-    data-quality gate before triggering expensive downstream compute jobs.
-    Raises ``AirflowException`` when fewer files than required are present.
+    ``DataLakeFileSystemClient.get_paths()`` (Azure SDK) with a configurable
+    minimum-count threshold acts as a data-quality gate before triggering
+    expensive downstream compute jobs.  Raises ``AirflowException`` when
+    fewer files than required are present.
 
 Connection
 ----------
@@ -128,14 +130,12 @@ def _get_matching_paths(
     Return PathProperties for all non-directory entries under *directory*
     whose file-name portion matches *pattern*.
 
-    Uses ``AzureDataLakeStorageV2Hook.get_paths()`` which performs a
-    recursive, flat listing of the ADLS Gen2 hierarchical namespace.
+    Uses the underlying DataLakeFileSystemClient.get_paths() from the
+    azure-storage-file-datalake SDK (AzureDataLakeStorageV2Hook does not
+    expose get_paths() directly in provider versions >= 10).
     """
-    all_paths = hook.get_paths(
-        file_system=file_system,
-        directory=directory or "",
-        recursive=True,
-    )
+    fs_client = hook.get_conn().get_file_system_client(file_system)
+    all_paths = list(fs_client.get_paths(path=directory or "", recursive=True))
     # Exclude directory entries — keep files only.
     files = [p for p in all_paths if not p.is_directory]
 
@@ -332,9 +332,9 @@ with DAG(
         Recursively list all files under *file_system / source_prefix* that
         match *file_pattern*.
 
-        Uses ``AzureDataLakeStorageV2Hook.get_paths()`` which returns rich
-        ``PathProperties`` metadata — size, last-modified time, creation time,
-        owner, POSIX permissions — printed in the task log.
+        Uses ``DataLakeFileSystemClient.get_paths()`` (Azure SDK) which returns
+        rich ``PathProperties`` metadata — size, last-modified time, creation
+        time, owner, POSIX permissions — printed in the task log.
 
         Returns
         -------

@@ -306,9 +306,9 @@ with DAG(
     # ─────────────────────────────────────────────────────────────────────────
 
     @task.branch(task_id="branch_operation")
-    def branch_operation(params: dict[str, Any]) -> str:
+    def branch_operation(conf: dict[str, Any]) -> str:
         """Return the task_id of the operation to execute; Airflow skips the rest."""
-        op = params["operation"]
+        op = conf["operation"]
         if op not in _OPERATIONS:
             raise AirflowException(
                 f"Unknown operation {op!r}. Valid: {_OPERATIONS}"
@@ -327,7 +327,7 @@ with DAG(
     # ─────────────────────────────────────────────────────────────────────────
 
     @task(task_id="list_files")
-    def list_files(params: dict[str, Any]) -> list[str]:
+    def list_files(conf: dict[str, Any]) -> list[str]:
         """
         Recursively list all files under *file_system / source_prefix* that
         match *file_pattern*.
@@ -341,9 +341,9 @@ with DAG(
         list[str]
             File paths (relative to the file system root) pushed to XCom.
         """
-        file_system = params["file_system"]
-        prefix = params["source_prefix"] or None
-        pattern = params["file_pattern"]
+        file_system = conf["file_system"]
+        prefix = conf["source_prefix"] or None
+        pattern = conf["file_pattern"]
 
         print(
             f"[list_files] file_system={file_system!r}  "
@@ -377,7 +377,7 @@ with DAG(
     # ─────────────────────────────────────────────────────────────────────────
 
     @task(task_id="move_files")
-    def move_files(params: dict[str, Any]) -> dict[str, Any]:
+    def move_files(conf: dict[str, Any]) -> dict[str, Any]:
         """
         Move (rename) files from *source_prefix* to *destination_prefix*
         within the same ADLS Gen2 file system.
@@ -398,11 +398,11 @@ with DAG(
         dict
             ``{moved: [...], errors: [...], dry_run: bool}``
         """
-        file_system = params["file_system"]
-        src_root = params["source_prefix"].rstrip("/") + "/"
-        dst_root = params["destination_prefix"].rstrip("/") + "/"
-        pattern = params["file_pattern"]
-        dry_run = params["dry_run"]
+        file_system = conf["file_system"]
+        src_root = conf["source_prefix"].rstrip("/") + "/"
+        dst_root = conf["destination_prefix"].rstrip("/") + "/"
+        pattern = conf["file_pattern"]
+        dry_run = conf["dry_run"]
 
         print(
             f"[move_files] file_system={file_system!r}  "
@@ -478,7 +478,7 @@ with DAG(
     # ─────────────────────────────────────────────────────────────────────────
 
     @task(task_id="delete_files")
-    def delete_files(params: dict[str, Any]) -> dict[str, Any]:
+    def delete_files(conf: dict[str, Any]) -> dict[str, Any]:
         """
         Delete all files under *file_system / source_prefix* whose file name
         matches *file_pattern*.
@@ -494,10 +494,10 @@ with DAG(
         dict
             ``{deleted: [...], errors: [...], dry_run: bool}``
         """
-        file_system = params["file_system"]
-        prefix = params["source_prefix"] or None
-        pattern = params["file_pattern"]
-        dry_run = params["dry_run"]
+        file_system = conf["file_system"]
+        prefix = conf["source_prefix"] or None
+        pattern = conf["file_pattern"]
+        dry_run = conf["dry_run"]
 
         print(
             f"[delete_files] file_system={file_system!r}  prefix={prefix!r}  "
@@ -553,7 +553,7 @@ with DAG(
     # ─────────────────────────────────────────────────────────────────────────
 
     @task(task_id="check_file_exists")
-    def check_file_exists(params: dict[str, Any]) -> dict[str, Any]:
+    def check_file_exists(conf: dict[str, Any]) -> dict[str, Any]:
         """
         Gate-check: verify that at least *min_file_count* files exist under
         *file_system / source_prefix* matching *file_pattern*.
@@ -578,10 +578,10 @@ with DAG(
         AirflowException
             When ``found < min_file_count``.
         """
-        file_system = params["file_system"]
-        prefix = params["source_prefix"] or None
-        pattern = params["file_pattern"]
-        min_count = params["min_file_count"]
+        file_system = conf["file_system"]
+        prefix = conf["source_prefix"] or None
+        pattern = conf["file_pattern"]
+        min_count = conf["min_file_count"]
 
         print(
             f"[check_file_exists] file_system={file_system!r}  "

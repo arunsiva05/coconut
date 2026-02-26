@@ -326,9 +326,9 @@ with DAG(
     # ─────────────────────────────────────────────────────────────────────────
 
     @task.branch(task_id="branch_operation")
-    def branch_operation(params: dict[str, Any]) -> str:
+    def branch_operation(conf: dict[str, Any]) -> str:
         """Return the task_id that matches the requested operation."""
-        op = params["operation"]
+        op = conf["operation"]
         if op not in _OPERATIONS:
             raise AirflowException(
                 f"Unknown operation {op!r}. Valid: {_OPERATIONS}"
@@ -344,7 +344,7 @@ with DAG(
     # ─────────────────────────────────────────────────────────────────────────
 
     @task(task_id="list_files")
-    def list_files(params: dict[str, Any]) -> list[str]:
+    def list_files(conf: dict[str, Any]) -> list[str]:
         """
         List every blob under *container / source_prefix* whose file name
         matches *file_pattern*.
@@ -354,9 +354,9 @@ with DAG(
         list[str]
             Blob names pushed to XCom (empty list when nothing matches).
         """
-        container = params["container_name"]
-        prefix = params["source_prefix"] or None
-        pattern = params["file_pattern"]
+        container = conf["container_name"]
+        prefix = conf["source_prefix"] or None
+        pattern = conf["file_pattern"]
 
         print(
             f"[list_files] container={container!r}  "
@@ -383,7 +383,7 @@ with DAG(
     # ─────────────────────────────────────────────────────────────────────────
 
     @task(task_id="move_files")
-    def move_files(params: dict[str, Any]) -> dict[str, Any]:
+    def move_files(conf: dict[str, Any]) -> dict[str, Any]:
         """
         Move blobs from *source_prefix* to *destination_prefix* within the same
         container.
@@ -400,11 +400,11 @@ with DAG(
         dict
             ``{moved: [...], errors: [...], dry_run: bool}``
         """
-        container = params["container_name"]
-        src_root = params["source_prefix"].rstrip("/") + "/"
-        dst_root = params["destination_prefix"].rstrip("/") + "/"
-        pattern = params["file_pattern"]
-        dry_run = params["dry_run"]
+        container = conf["container_name"]
+        src_root = conf["source_prefix"].rstrip("/") + "/"
+        dst_root = conf["destination_prefix"].rstrip("/") + "/"
+        pattern = conf["file_pattern"]
+        dry_run = conf["dry_run"]
 
         print(
             f"[move_files] container={container!r}  "
@@ -457,7 +457,7 @@ with DAG(
     # ─────────────────────────────────────────────────────────────────────────
 
     @task(task_id="delete_files")
-    def delete_files(params: dict[str, Any]) -> dict[str, Any]:
+    def delete_files(conf: dict[str, Any]) -> dict[str, Any]:
         """
         Delete all blobs under *container / source_prefix* whose file name
         matches *file_pattern*.
@@ -471,10 +471,10 @@ with DAG(
         dict
             ``{deleted: [...], errors: [...], dry_run: bool}``
         """
-        container = params["container_name"]
-        prefix = params["source_prefix"] or None
-        pattern = params["file_pattern"]
-        dry_run = params["dry_run"]
+        container = conf["container_name"]
+        prefix = conf["source_prefix"] or None
+        pattern = conf["file_pattern"]
+        dry_run = conf["dry_run"]
 
         print(
             f"[delete_files] container={container!r}  prefix={prefix!r}  "
@@ -527,7 +527,7 @@ with DAG(
     # ─────────────────────────────────────────────────────────────────────────
 
     @task(task_id="check_file_exists")
-    def check_file_exists(params: dict[str, Any]) -> dict[str, Any]:
+    def check_file_exists(conf: dict[str, Any]) -> dict[str, Any]:
         """
         Verify that at least *min_file_count* blobs exist under
         *container / source_prefix* matching *file_pattern*.
@@ -546,10 +546,10 @@ with DAG(
         AirflowException
             When fewer than *min_file_count* matching blobs are found.
         """
-        container = params["container_name"]
-        prefix = params["source_prefix"] or None
-        pattern = params["file_pattern"]
-        min_count = params["min_file_count"]
+        container = conf["container_name"]
+        prefix = conf["source_prefix"] or None
+        pattern = conf["file_pattern"]
+        min_count = conf["min_file_count"]
 
         print(
             f"[check_file_exists] container={container!r}  prefix={prefix!r}  "

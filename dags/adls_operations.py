@@ -89,9 +89,9 @@ from airflow.exceptions import AirflowException
 from airflow.models.param import Param
 from airflow.utils.trigger_rule import TriggerRule
 
-from airflow.providers.microsoft.azure.hooks.data_lake import (
-    AzureDataLakeStorageV2Hook,
-)
+from airflow.hooks.base import BaseHook
+from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
+from azure.storage.filedatalake import DataLakeServiceClient
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -115,13 +115,35 @@ _OPERATIONS = ("list_files", "move_files", "delete_files", "check_file_exists")
 # 2. Internal helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_hook() -> AzureDataLakeStorageV2Hook:
-    """Return an authenticated AzureDataLakeStorageV2Hook via Managed Identity."""
-    return AzureDataLakeStorageV2Hook(adls_conn_id=ADLS_CONN_ID)
+def _get_service_client() -> DataLakeServiceClient:
+    """
+    Build a DataLakeServiceClient directly using azure-identity credentials.
+
+    Bypasses AzureDataLakeStorageV2Hook.get_conn() which wraps the credential
+    in AzureIdentityCredentialAdapter — a deprecated shim that newer versions
+    of azure-storage-file-datalake no longer accept.
+
+    Connection layout (conn type: adls_v2)
+    ----------------------------------------
+    Host   → storage account name (e.g. ``mystorageaccount``)
+    Extra  → ``{"managed_identity_client_id": "<id>"}``  (optional, user-assigned MI)
+    """
+    conn = BaseHook.get_connection(ADLS_CONN_ID)
+    account_name: str = conn.host  # storage account name
+    extra: dict = conn.extra_dejson or {}
+    client_id: str | None = extra.get("managed_identity_client_id")
+
+    credential = (
+        ManagedIdentityCredential(client_id=client_id)
+        if client_id
+        else DefaultAzureCredential()
+    )
+    account_url = f"https://{account_name}.dfs.core.windows.net"
+    return DataLakeServiceClient(account_url=account_url, credential=credential)
 
 
 def _get_matching_paths(
-    hook: AzureDataLakeStorageV2Hook,
+    service_client: DataLakeServiceClient,
     file_system: str,
     directory: str | None,
     pattern: str,
@@ -129,12 +151,8 @@ def _get_matching_paths(
     """
     Return PathProperties for all non-directory entries under *directory*
     whose file-name portion matches *pattern*.
-
-    Uses the underlying DataLakeFileSystemClient.get_paths() from the
-    azure-storage-file-datalake SDK (AzureDataLakeStorageV2Hook does not
-    expose get_paths() directly in provider versions >= 10).
     """
-    fs_client = hook.get_conn().get_file_system_client(file_system)
+    fs_client = service_client.get_file_system_client(file_system)
     all_paths = list(fs_client.get_paths(path=directory or "", recursive=True))
     # Exclude directory entries — keep files only.
     files = [p for p in all_paths if not p.is_directory]
@@ -148,7 +166,7 @@ def _get_matching_paths(
 
 
 def _ensure_directory(
-    hook: AzureDataLakeStorageV2Hook,
+    service_client: DataLakeServiceClient,
     file_system: str,
     directory: str,
 ) -> None:
@@ -158,10 +176,7 @@ def _ensure_directory(
     an existing directory is a no-op.
     """
     try:
-        hook.create_directory(
-            file_system_name=file_system,
-            directory_name=directory,
-        )
+        service_client.get_file_system_client(file_system).create_directory(directory)
     except Exception as exc:
         # Swallow "already exists" errors; re-raise everything else.
         err = str(exc).lower()
@@ -350,8 +365,8 @@ with DAG(
             f"prefix={prefix!r}  pattern={pattern!r}"
         )
 
-        hook = _get_hook()
-        files = _get_matching_paths(hook, file_system, prefix, pattern)
+        service_client = _get_service_client()
+        files = _get_matching_paths(service_client, file_system, prefix, pattern)
 
         if not files:
             print("[list_files] No files found matching the given parameters.")
@@ -410,8 +425,8 @@ with DAG(
             f"pattern={pattern!r}  dry_run={dry_run}"
         )
 
-        hook = _get_hook()
-        files = _get_matching_paths(hook, file_system, src_root, pattern)
+        service_client = _get_service_client()
+        files = _get_matching_paths(service_client, file_system, src_root, pattern)
 
         if not files:
             print("[move_files] No matching files — nothing to move.")
@@ -430,9 +445,10 @@ with DAG(
                 for p in files
             }
             for dst_dir in dst_dirs:
-                _ensure_directory(hook, file_system, dst_dir)
+                _ensure_directory(service_client, file_system, dst_dir)
 
         # ── Atomic server-side rename per file ────────────────────────────────
+        fs_client = service_client.get_file_system_client(file_system)
         for path_props in files:
             src_path = path_props.name                    # e.g. landing/sales/2024/01/orders.parquet
             rel = src_path[len(src_root):]                # e.g. 2024/01/orders.parquet
@@ -446,10 +462,7 @@ with DAG(
                 continue
 
             try:
-                file_client = hook.get_file_client(
-                    file_system_name=file_system,
-                    file_path=src_path,
-                )
+                file_client = fs_client.get_file_client(src_path)
                 # Atomic O(1) rename — unique to ADLS Gen2 hierarchical namespace.
                 # new_name format: "{file_system}/{destination_path}"
                 file_client.rename_file(
@@ -504,8 +517,8 @@ with DAG(
             f"pattern={pattern!r}  dry_run={dry_run}"
         )
 
-        hook = _get_hook()
-        files = _get_matching_paths(hook, file_system, prefix, pattern)
+        service_client = _get_service_client()
+        files = _get_matching_paths(service_client, file_system, prefix, pattern)
 
         if not files:
             print("[delete_files] No matching files — nothing to delete.")
@@ -515,6 +528,7 @@ with DAG(
         deleted: list[str] = []
         errors: list[str] = []
 
+        fs_client = service_client.get_file_system_client(file_system)
         for path_props in files:
             file_path = path_props.name
             print(f"  DELETE  {file_path!r}", end="")
@@ -525,10 +539,7 @@ with DAG(
                 continue
 
             try:
-                file_client = hook.get_file_client(
-                    file_system_name=file_system,
-                    file_path=file_path,
-                )
+                file_client = fs_client.get_file_client(file_path)
                 file_client.delete_file()
                 deleted.append(file_path)
                 print("  ✓")
@@ -589,8 +600,8 @@ with DAG(
             f"min_file_count={min_count}"
         )
 
-        hook = _get_hook()
-        files = _get_matching_paths(hook, file_system, prefix, pattern)
+        service_client = _get_service_client()
+        files = _get_matching_paths(service_client, file_system, prefix, pattern)
         found = len(files)
 
         print(f"[check_file_exists] found={found}  required>={min_count}")

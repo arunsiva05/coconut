@@ -38,6 +38,9 @@ sensors:
       asset_name: "sales_data_ready"
       poke_interval: 60       # seconds between SQL polls
       timeout: 7200           # max seconds to wait
+      metadata_fields:        # Extra fields emitted with every asset event
+        - row_count           # Number of matching rows found by the sensor
+        - source              # System / job that produced this asset event
 
     - name: "inventory_data_ready"
       sql: >
@@ -48,6 +51,9 @@ sensors:
       asset_name: "inventory_data_ready"
       poke_interval: 60
       timeout: 7200
+      metadata_fields:
+        - row_count
+        - source
 
     # ── Add more checks here ──────────────────────────────────────────────────
     # - name: "orders_data_ready"

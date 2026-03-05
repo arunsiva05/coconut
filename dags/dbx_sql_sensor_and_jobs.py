@@ -212,9 +212,27 @@ with DAG(
 
     _date_task = resolve_date()
 
+    # Factory to capture loop variables for the per-asset emit task.
+    # Without this, every closure would reference the last value of _check/_asset.
+    def _make_emit_fn(check: dict[str, Any], asset: Asset):
+        @task(task_id=f"emit_asset__{check['name']}", outlets=[asset])
+        def _emit(yyyymmdd: str, *, outlet_events, **_ctx: Any) -> None:
+            """Emit the asset event with the resolved date and configured metadata fields."""
+            outlet_events[asset].extra = {
+                "date": yyyymmdd,
+                "source": "databricks_sql_sensor",
+                **{f: None for f in check.get("metadata_fields", [])},
+            }
+            print(
+                f"[emit_asset__{check['name']}] emitted with date={yyyymmdd!r} "
+                f"extra={outlet_events[asset].extra}"
+            )
+        return _emit
+
     # One DatabricksSqlSensor per check — all run in parallel after resolve_date.
     # {YYYYMMDD} is replaced via Jinja XCom pull so the date is injected at
     # execution time (not at DAG-parse time).
+    # Each sensor is followed by an emit_asset__ task that records metadata.
     for _check in _SENSOR_CHECKS:
         _sql = _check["sql"].replace(
             "{YYYYMMDD}",
@@ -228,10 +246,11 @@ with DAG(
             mode="reschedule",           # frees worker slot between polls
             poke_interval=_check.get("poke_interval", 60),
             timeout=_check.get("timeout", 3600),
-            outlets=[_assets[_check["name"]]],   # emits Asset on success
+            # outlets removed — asset emission + metadata handled by emit_asset__ task
         )
 
-        _date_task >> _sensor
+        _emit_fn = _make_emit_fn(_check, _assets[_check["name"]])
+        _date_task >> _sensor >> _emit_fn(_date_task)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

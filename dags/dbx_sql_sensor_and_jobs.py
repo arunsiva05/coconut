@@ -1,29 +1,37 @@
 """
-Airflow 3.x — Databricks SQL Sensor + Job Runner  (DAG Factory)
-================================================================
+Airflow 3.x — Databricks Asset-Triggered Job Runner  (DAG Factory)
+===================================================================
 
 DAGs produced by this module
 ─────────────────────────────
-  dbx_sql_sensor_dag
-    • Triggered manually (or by an upstream scheduler)
-    • Params: date_mode (Today | Yesterday | Custom), custom_date (YYYYMMDD)
-    • Resolves YYYYMMDD and injects it into every SQL sensor via XCom
-    • Runs one DatabricksSqlSensor per sensors.checks entry
-    • Each sensor emits an Airflow Asset on success
-
   dbx_job_runner__<job.name>   [one DAG per job in config]
-    • Auto-triggered by Airflow's asset scheduler:
+    • Scheduled on Airflow Assets — no cron, no manual trigger needed.
         operation: AND  →  schedule = AssetAll(*depends_on assets)
         operation: OR   →  schedule = AssetAny(*depends_on assets)
-    • Params: date_mode / custom_date (same defaults as sensor DAG)
+    • Assets are emitted externally (Databricks, loaders, REST API).
+      See tools/emit_asset.py for the emission helper.
+    • Params: date_mode (Today | Yesterday | Custom), custom_date (YYYYMMDD)
     • Looks up the Databricks job_id at runtime from job_name
     • Substitutes {YYYYMMDD} in notebook_params / python_params
     • Triggers the run via DatabricksHook and waits for completion
 
+Assets
+──────
+  Assets are defined in config/dag_config.yaml under the `assets` key.
+  No producer DAG exists — assets are emitted entirely from outside Airflow
+  via POST /api/v2/assets/events with an `extra` metadata payload:
+
+    {
+      "uri":   "dbx+sql://sales_data_ready",
+      "extra": { "row_count": 15000, "source": "databricks_job_42", "date": "20240101" }
+    }
+
+  Use tools/emit_asset.py for a zero-dependency Python helper.
+
 Connection
 ──────────
   A single Airflow Databricks connection (databricks_conn_id from config)
-  is used by every sensor and every job.  No per-task connection override.
+  is used by every job.  No per-task connection override.
 
 Date modes
 ──────────
@@ -50,7 +58,6 @@ from airflow.decorators import task
 from airflow.exceptions import AirflowException
 from airflow.sdk import Asset, AssetAll, AssetAny
 from airflow.providers.databricks.hooks.databricks import DatabricksHook
-from airflow.providers.databricks.sensors.databricks_sql import DatabricksSqlSensor
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,15 +70,14 @@ _CONFIG_PATH = _PROJECT_ROOT / "config" / "dag_config.yaml"
 with _CONFIG_PATH.open() as _fh:
     _cfg: dict[str, Any] = yaml.safe_load(_fh)
 
-# Single fixed connection for the entire module — no per-task override
 DATABRICKS_CONN_ID: str = _cfg["databricks_conn_id"]
 
-_SENSOR_CHECKS: list[dict[str, Any]] = _cfg["sensors"]["checks"]
+_ASSET_CONFIGS: list[dict[str, Any]] = _cfg.get("assets", [])
 _JOB_CONFIGS: list[dict[str, Any]] = _cfg.get("jobs", [])
 
 # ── Validate at import time so Airflow surfaces config errors early ───────────
-if not _SENSOR_CHECKS:
-    raise ValueError(f"sensors.checks must not be empty — check {_CONFIG_PATH}")
+if not _ASSET_CONFIGS:
+    raise ValueError(f"assets must not be empty — check {_CONFIG_PATH}")
 
 for _jc in _JOB_CONFIGS:
     if "job_name" not in _jc:
@@ -88,19 +94,28 @@ for _jc in _JOB_CONFIGS:
             f"Job {_jc.get('name')!r}: operation must be 'AND' or 'OR', got {_jop!r}"
         )
     for _dep in _jc["depends_on"]:
-        _known = {c["name"] for c in _SENSOR_CHECKS}
+        _known = {a["name"] for a in _ASSET_CONFIGS}
         if _dep not in _known:
             raise ValueError(
                 f"Job {_jc.get('name')!r}: depends_on entry {_dep!r} "
-                f"does not match any sensor check name. Known: {sorted(_known)}"
+                f"does not match any asset name. Known: {sorted(_known)}"
             )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. Helpers
+# 2. Asset registry  (one Asset per entry in config.assets)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# date_mode param defaults — NOT read from config
+_assets: dict[str, Asset] = {
+    ac["name"]: Asset(uri=ac["uri"])
+    for ac in _ASSET_CONFIGS
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
 _DATE_PARAMS: dict[str, str] = {
     "date_mode": "Yesterday",   # Today | Yesterday | Custom
     "custom_date": "",          # YYYYMMDD — required only for Custom
@@ -137,14 +152,14 @@ def _find_job_id_by_name(hook: DatabricksHook, job_name: str) -> int:
         When no job with that exact display name exists in the workspace.
     """
     params: dict[str, Any] = {
-        "name": job_name,       # server-side filter (may be prefix-based)
+        "name": job_name,
         "limit": 25,
         "expand_tasks": False,
     }
     while True:
         response = hook._do_api_call(("GET", "api/2.1/jobs/list"), params)
         for job in response.get("jobs", []):
-            if job.get("settings", {}).get("name") == job_name:   # exact match
+            if job.get("settings", {}).get("name") == job_name:
                 return int(job["job_id"])
         if not response.get("has_more", False):
             break
@@ -161,15 +176,6 @@ def _subst(value: str, yyyymmdd: str) -> str:
     return value.replace("{YYYYMMDD}", yyyymmdd)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Asset registry  (one Asset per sensor check)
-# ─────────────────────────────────────────────────────────────────────────────
-
-_assets: dict[str, Asset] = {
-    check["name"]: Asset(uri=f"dbx+sql://{check['asset_name']}")
-    for check in _SENSOR_CHECKS
-}
-
 _SHARED_ARGS: dict[str, Any] = {
     "owner": "data-engineering",
     "retries": 1,
@@ -178,85 +184,9 @@ _SHARED_ARGS: dict[str, Any] = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. DAG 1: dbx_sql_sensor_dag
-# ─────────────────────────────────────────────────────────────────────────────
-
-with DAG(
-    dag_id="dbx_sql_sensor_dag",
-    description=(
-        "Runs Databricks SQL sensors and emits Airflow Assets when data "
-        "conditions are satisfied."
-    ),
-    schedule=None,
-    start_date=datetime(2024, 1, 1),
-    catchup=False,
-    max_active_runs=1,
-    default_args=_SHARED_ARGS,
-    tags=["databricks", "sensor", "assets"],
-    params=_DATE_PARAMS,
-    doc_md=__doc__,
-) as sensor_dag:
-
-    @task(task_id="resolve_date")
-    def resolve_date(**context: Any) -> str:
-        """
-        Resolve the run date from DAG params.
-        Returns YYYYMMDD string pushed to XCom for use by every sensor.
-        """
-        p = context.get("params", {})
-        mode = p.get("date_mode") or "Yesterday"
-        cdate = p.get("custom_date") or None
-        resolved = _resolve_date(mode, cdate)
-        print(f"[resolve_date] mode={mode!r}  custom_date={cdate!r}  → {resolved!r}")
-        return resolved
-
-    _date_task = resolve_date()
-
-    # Factory to capture loop variables for the per-asset emit task.
-    # Without this, every closure would reference the last value of _check/_asset.
-    def _make_emit_fn(check: dict[str, Any], asset: Asset):
-        @task(task_id=f"emit_asset__{check['name']}", outlets=[asset])
-        def _emit(yyyymmdd: str, *, outlet_events, **_ctx: Any) -> None:
-            """Emit the asset event with the resolved date and configured metadata fields."""
-            outlet_events[asset].extra = {
-                "date": yyyymmdd,
-                "source": "databricks_sql_sensor",
-                **{f: None for f in check.get("metadata_fields", [])},
-            }
-            print(
-                f"[emit_asset__{check['name']}] emitted with date={yyyymmdd!r} "
-                f"extra={outlet_events[asset].extra}"
-            )
-        return _emit
-
-    # One DatabricksSqlSensor per check — all run in parallel after resolve_date.
-    # {YYYYMMDD} is replaced via Jinja XCom pull so the date is injected at
-    # execution time (not at DAG-parse time).
-    # Each sensor is followed by an emit_asset__ task that records metadata.
-    for _check in _SENSOR_CHECKS:
-        _sql = _check["sql"].replace(
-            "{YYYYMMDD}",
-            "{{ ti.xcom_pull(task_ids='resolve_date') }}",
-        )
-
-        _sensor = DatabricksSqlSensor(
-            task_id=f"sensor__{_check['name']}",
-            databricks_conn_id=DATABRICKS_CONN_ID,
-            sql=_sql,
-            mode="reschedule",           # frees worker slot between polls
-            poke_interval=_check.get("poke_interval", 60),
-            timeout=_check.get("timeout", 3600),
-            # outlets removed — asset emission + metadata handled by emit_asset__ task
-        )
-
-        _emit_fn = _make_emit_fn(_check, _assets[_check["name"]])
-        _date_task >> _sensor >> _emit_fn(_date_task)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. DAG Factory: one job runner DAG per configured job
-#    Each DAG has its own schedule (AssetAll / AssetAny based on job.operation)
-#    and looks up the Databricks job_id from job_name at runtime.
+# 4. DAG Factory: one job runner DAG per configured job
+#    Each DAG is scheduled on an AssetAll / AssetAny of its depends_on assets.
+#    Assets are emitted externally — see tools/emit_asset.py.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_job_runner_dag(job_cfg: dict[str, Any]) -> DAG:
@@ -272,7 +202,6 @@ def _build_job_runner_dag(job_cfg: dict[str, Any]) -> DAG:
     _dep_assets: list[Asset] = [_assets[d] for d in job_cfg["depends_on"]]
     _schedule = AssetAll(*_dep_assets) if _op == "AND" else AssetAny(*_dep_assets)
 
-    # Capture param dicts for the closure — evaluated once at parse time
     _nb_params: dict[str, str] = {
         k: str(v) for k, v in job_cfg.get("notebook_params", {}).items()
     }
@@ -291,14 +220,14 @@ def _build_job_runner_dag(job_cfg: dict[str, Any]) -> DAG:
         max_active_runs=3,
         default_args=_SHARED_ARGS,
         tags=["databricks", "jobs", "assets"],
-        params=_DATE_PARAMS,   # date_mode defaults to Yesterday; override at trigger
+        params=_DATE_PARAMS,
     )
 
     with dag:
 
         @task(task_id="resolve_job_date")
         def resolve_job_date(**context: Any) -> str:
-            """Resolve YYYYMMDD from DAG params (same logic as sensor DAG)."""
+            """Resolve YYYYMMDD from DAG params."""
             p = context.get("params", {})
             mode = p.get("date_mode") or "Yesterday"
             cdate = p.get("custom_date") or None
@@ -319,16 +248,13 @@ def _build_job_runner_dag(job_cfg: dict[str, Any]) -> DAG:
             """
             hook = DatabricksHook(databricks_conn_id=DATABRICKS_CONN_ID)
 
-            # ── Step 1: resolve job_id ────────────────────────────────────────
             job_id = _find_job_id_by_name(hook, _job_display_name)
             print(f"[{_jname}] resolved job_id={job_id} for {_job_display_name!r}")
 
-            # ── Step 2: substitute date placeholder ───────────────────────────
             nb = {k: _subst(v, yyyymmdd) for k, v in _nb_params.items()}
             py = [_subst(v, yyyymmdd) for v in _py_params]
             spark = [_subst(v, yyyymmdd) for v in _spark_params]
 
-            # ── Step 3: build API payload ──────────────────────────────────────
             payload: dict[str, Any] = {"job_id": job_id}
             if nb:
                 payload["notebook_params"] = nb
@@ -339,15 +265,12 @@ def _build_job_runner_dag(job_cfg: dict[str, Any]) -> DAG:
 
             print(f"[{_jname}] triggering run — payload: {payload}")
 
-            # ── Step 4: trigger and wait ───────────────────────────────────────
             run_id = hook.run_now(payload)
             print(f"[{_jname}] run_id={run_id}, waiting for completion …")
             hook.wait_for_run(run_id, verbose=True)
 
             return run_id
 
-        # Passing _jdate (XComArg) as the argument automatically sets
-        # the task dependency: resolve_job_date → run__<name>
         run_dbx_job(yyyymmdd=_jdate)
 
     return dag

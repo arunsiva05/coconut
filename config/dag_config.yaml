@@ -1,73 +1,56 @@
 # =============================================================================
-# DBX SQL Sensor + Job Runner — DAG Configuration
+# Databricks Job Runner — DAG Configuration
 # =============================================================================
 #
-# databricks_conn_id
-#   Single fixed Airflow connection used by every sensor and every job.
+# assets
+#   Each entry defines an Airflow Asset that external systems (Databricks,
+#   loaders, etc.) emit via the Airflow REST API.
+#   Assets have no producer DAG — they are emitted entirely from outside
+#   Airflow using POST /api/v2/assets/events (see tools/emit_asset.py).
 #
-# sensors.checks
-#   Each entry polls a Databricks SQL endpoint.
-#   The placeholder {YYYYMMDD} in sql is replaced at runtime with the date
-#   resolved from the date_mode DAG param (Today | Yesterday | Custom).
-#   On success, each check emits the named Airflow Asset.
+#   Fields:
+#     name            – identifier used in jobs.depends_on
+#     uri             – unique asset URI registered in Airflow
+#     metadata_fields – optional list of extra keys expected in each event;
+#                       documented here for reference, not enforced by Airflow
 #
 # jobs
-#   Each job entry specifies:
-#     job_name    – Databricks display name; job_id is looked up at runtime.
-#     operation   – AND → all listed depends_on assets must be emitted (AssetAll)
-#                   OR  → any one of them is enough                   (AssetAny)
-#     depends_on  – list of sensor check names whose assets gate this job.
+#   Each entry creates one dbx_job_runner__<name> DAG.
+#   Fields:
+#     job_name    – Databricks display name; job_id is looked up at runtime
+#     operation   – AND → all depends_on assets must be emitted (AssetAll)
+#                   OR  → any one of them is enough             (AssetAny)
+#     depends_on  – list of asset names (must match assets[*].name above)
 #
-# date_mode is NOT stored here.  Pass it as a DAG param at trigger time.
-# Default is "Yesterday".  Valid values: Today | Yesterday | Custom
-# When Custom, also pass custom_date (YYYYMMDD).
+#   {YYYYMMDD} in any parameter value is replaced with the resolved date.
+#   date_mode is passed as a DAG param at trigger time (default: Yesterday).
 # =============================================================================
 
-# ── Single connection used by all sensors and jobs ───────────────────────────
+# ── Single connection used by all jobs ───────────────────────────────────────
 databricks_conn_id: "databricks_default"
 
-# ── SQL Sensor checks ─────────────────────────────────────────────────────────
-sensors:
-  checks:
-    - name: "sales_data_ready"
-      sql: >
-        SELECT COUNT(*) AS cnt
-        FROM   main.default.sales
-        WHERE  sale_date = '{YYYYMMDD}'
-        HAVING COUNT(*) > 0
-      asset_name: "sales_data_ready"
-      poke_interval: 60       # seconds between SQL polls
-      timeout: 7200           # max seconds to wait
-      metadata_fields:        # Extra fields emitted with every asset event
-        - row_count           # Number of matching rows found by the sensor
-        - source              # System / job that produced this asset event
+# ── Assets emitted externally (Databricks, loaders, REST API) ────────────────
+assets:
+  - name: "sales_data_ready"
+    uri: "dbx+sql://sales_data_ready"
+    metadata_fields:          # keys expected in every emitted asset event
+      - row_count             # number of rows processed / loaded
+      - source                # system/job that produced this event
+      - date                  # YYYYMMDD of the data partition
 
-    - name: "inventory_data_ready"
-      sql: >
-        SELECT 1
-        FROM   main.default.inventory
-        WHERE  report_date = '{YYYYMMDD}'
-        LIMIT  1
-      asset_name: "inventory_data_ready"
-      poke_interval: 60
-      timeout: 7200
-      metadata_fields:
-        - row_count
-        - source
+  - name: "inventory_data_ready"
+    uri: "dbx+sql://inventory_data_ready"
+    metadata_fields:
+      - row_count
+      - source
+      - date
 
-    # ── Add more checks here ──────────────────────────────────────────────────
-    # - name: "orders_data_ready"
-    #   sql: >
-    #     SELECT 1 FROM main.default.orders
-    #     WHERE order_date = '{YYYYMMDD}' LIMIT 1
-    #   asset_name: "orders_data_ready"
-    #   poke_interval: 60
-    #   timeout: 7200
+  # ── Add more assets here ──────────────────────────────────────────────────
+  # - name: "orders_data_ready"
+  #   uri: "dbx+sql://orders_data_ready"
+  #   metadata_fields: [row_count, source, date]
 
 # ── Databricks Jobs ───────────────────────────────────────────────────────────
-# job_name is the Databricks display name; job_id is resolved at runtime.
-# operation and depends_on are per-job.
-# {YYYYMMDD} in any parameter value is replaced with the resolved date.
 jobs:
   - name: "process_sales"
     job_name: "Process Sales Job"

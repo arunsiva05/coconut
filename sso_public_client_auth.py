@@ -9,6 +9,7 @@ Supports two flows:
 Usage:
     python sso_public_client_auth.py
     python sso_public_client_auth.py --flow interactive
+    python sso_public_client_auth.py --flow interactive --redirect-port 8400
     python sso_public_client_auth.py --scopes "User.Read" "https://storage.azure.com/.default"
     python sso_public_client_auth.py --groups            # also fetch group claims
     python sso_public_client_auth.py --groups --resolve  # resolve group IDs to display names
@@ -18,6 +19,20 @@ Environment variables (override config defaults):
     SSO_TENANT_ID    - Azure AD tenant ID or "common"/"organizations"  [required]
     SSO_SCOPES       - Space-separated scopes  [optional, default: User.Read]
     SSO_CACHE_FILE   - Path to persist the token cache  [optional]
+
+Interactive browser flow — redirect URI setup:
+  MSAL starts a local HTTP server to receive the auth code after login.
+  You must register the redirect URI in your Azure AD app registration:
+
+    Azure Portal → App registrations → <your app>
+    → Authentication → Add a platform → Mobile and desktop applications
+    → Add:  http://localhost
+
+  Registering bare "http://localhost" covers all ports automatically for
+  public clients.  If your policy requires a fixed port, register the exact
+  URI (e.g. http://localhost:8400) and pass --redirect-port 8400.
+
+  Device code flow does NOT use a redirect URI — use it for headless/CI.
 
 Group claims notes:
   Azure AD embeds group object IDs in the token only when the user belongs to
@@ -125,8 +140,16 @@ def acquire_via_device_code(
 def acquire_via_interactive(
     app: msal.PublicClientApplication,
     scopes: list[str],
+    redirect_port: int | None = None,
 ) -> dict:
-    return app.acquire_token_interactive(scopes=scopes)
+    # MSAL spawns a local HTTP server on `redirect_port` (random if None) and
+    # opens the browser to the Azure AD login page.  The registered redirect URI
+    # must be "http://localhost" (covers all ports) or the exact
+    # "http://localhost:<port>" if a fixed port is required by policy.
+    kwargs: dict = {}
+    if redirect_port is not None:
+        kwargs["port"] = redirect_port
+    return app.acquire_token_interactive(scopes=scopes, **kwargs)
 
 
 def get_access_token(
@@ -135,15 +158,19 @@ def get_access_token(
     scopes: list[str],
     flow: str = "device_code",
     cache_file: str = DEFAULT_CACHE_FILE,
+    redirect_port: int | None = None,
 ) -> str:
     """Return a valid access token, using cache when possible.
 
     Args:
-        client_id:  Azure AD app (client) ID.
-        tenant_id:  Azure AD tenant ID, "common", or "organizations".
-        scopes:     List of OAuth scopes to request.
-        flow:       "device_code" or "interactive".
-        cache_file: Path to persist token cache across calls.
+        client_id:     Azure AD app (client) ID.
+        tenant_id:     Azure AD tenant ID, "common", or "organizations".
+        scopes:        List of OAuth scopes to request.
+        flow:          "device_code" or "interactive".
+        cache_file:    Path to persist token cache across calls.
+        redirect_port: Local port for the interactive flow's redirect server.
+                       None lets MSAL pick a random available port.
+                       Ignored for device_code flow.
 
     Returns:
         Access token string.
@@ -167,7 +194,7 @@ def get_access_token(
         if flow == "device_code":
             result = acquire_via_device_code(app, scopes)
         else:
-            result = acquire_via_interactive(app, scopes)
+            result = acquire_via_interactive(app, scopes, redirect_port=redirect_port)
 
     _save_cache(cache, cache_file)
 
@@ -378,6 +405,18 @@ def _parse_args() -> argparse.Namespace:
         help="Authentication flow to use (default: device_code)",
     )
     parser.add_argument(
+        "--redirect-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help=(
+            "Local port for the interactive flow redirect server "
+            "(e.g. 8400). Random if omitted. "
+            "Register 'http://localhost:<PORT>' in your Azure AD app if fixed. "
+            "Ignored for device_code flow."
+        ),
+    )
+    parser.add_argument(
         "--cache-file",
         default=DEFAULT_CACHE_FILE,
         help="File path for token cache persistence  [env: SSO_CACHE_FILE]",
@@ -413,7 +452,7 @@ def main() -> None:
         if args.flow == "device_code":
             result = acquire_via_device_code(app, args.scopes)
         else:
-            result = acquire_via_interactive(app, args.scopes)
+            result = acquire_via_interactive(app, args.scopes, redirect_port=args.redirect_port)
 
     _save_cache(cache, args.cache_file)
 
